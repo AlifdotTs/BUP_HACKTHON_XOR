@@ -19,7 +19,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Edit .env and set GROQ_API_KEY. Optionally set OPENROUTER_API_KEY.
 ```
 
-Never commit the key or a `.env` file. Groq is the primary OpenAI-compatible provider. If `GROQ_API_KEY` is unavailable or Groq fails after its retries, the service uses OpenRouter as a secondary provider when `OPENROUTER_API_KEY` is configured. The default backup model is `openai/gpt-oss-20b:free`. The service sends only synthetic operator notes and battery capacity to the model. JSON mode requests valid JSON, and deterministic code validates the directives before optimization. Provider retries, invalid-output retries, and backoff share a 28-second total request budget so the API remains within the judge's 30-second limit.
+Never commit the key or a `.env` file. Groq is the primary OpenAI-compatible provider. If `GROQ_API_KEY` is unavailable or Groq fails after its retries, the service uses OpenRouter as a secondary provider when `OPENROUTER_API_KEY` is configured. The default backup model is `openai/gpt-oss-20b` (low-cost, not free). The service sends only synthetic operator notes and battery capacity to the model. JSON mode requests valid JSON, and deterministic code validates the directives before optimization. Provider retries, invalid-output retries, and backoff share a 28-second total request budget so the API remains within the judge's 30-second limit.
 
 Start the API from the repository root:
 
@@ -63,6 +63,8 @@ The API is then available at `http://127.0.0.1:8000`. Stop it with:
 ```powershell
 docker compose down
 ```
+
+Compose reports the API as `healthy` after its `/health` check passes and stores the SQLite metrics in the named `metrics_data` volume. View the local metrics dashboard at `http://127.0.0.1:8000/test-dashboard`.
 
 To build and run the image directly:
 

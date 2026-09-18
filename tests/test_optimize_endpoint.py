@@ -194,7 +194,7 @@ def test_openrouter_is_used_after_groq_failure(
     assert response.status_code == 200
     assert calls == [
         ("https://api.groq.com/openai/v1", "openai/gpt-oss-20b"),
-        ("https://openrouter.ai/api/v1", "openai/gpt-oss-20b:free"),
+        ("https://openrouter.ai/api/v1", "openai/gpt-oss-20b"),
     ]
     assert "Groq unavailable" in caplog.text
 

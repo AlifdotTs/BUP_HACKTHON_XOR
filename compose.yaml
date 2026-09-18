@@ -10,10 +10,23 @@ services:
       GROQ_TOTAL_TIMEOUT_SECONDS: ${GROQ_TOTAL_TIMEOUT_SECONDS:-28.0}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPEN_ROUTER_API: ${OPEN_ROUTER_API:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-oss-20b:free}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-oss-20b}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_MAX_RETRIES: ${OPENROUTER_MAX_RETRIES:-1}
       METRICS_DB_PATH: ${METRICS_DB_PATH:-data/request_metrics.sqlite3}
     ports:
       - "8000:8000"
+    volumes:
+      - metrics_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    init: true
+    stop_grace_period: 15s
     restart: unless-stopped
+
+volumes:
+  metrics_data:

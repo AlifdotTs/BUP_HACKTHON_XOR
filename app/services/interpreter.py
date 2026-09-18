@@ -142,7 +142,7 @@ def _configured_providers() -> list[_Provider]:
                 name="OpenRouter",
                 api_key=openrouter_key,
                 model=os.environ.get(
-                    "OPENROUTER_MODEL", "openai/gpt-oss-20b:free"
+                    "OPENROUTER_MODEL", "openai/gpt-oss-20b"
                 ),
                 base_url=os.environ.get(
                     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
