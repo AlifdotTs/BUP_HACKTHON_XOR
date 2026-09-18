@@ -76,6 +76,8 @@ Expected response:
 
 The service exposes three useful routes.
 
+FastAPI also exposes interactive API documentation at `http://127.0.0.1:8000/docs`. Open it in a browser, choose `POST /optimize-energy`, select **Try it out**, paste a complete 24-hour request, and select **Execute**. The response appears directly below the request form.
+
 ## Public deployment
 
 The current public Render deployment is:
@@ -88,7 +90,18 @@ Use these public routes to verify the deployment:
 GET  https://bup-fest-api-xor.onrender.com/health
 POST https://bup-fest-api-xor.onrender.com/optimize-energy
 GET  https://bup-fest-api-xor.onrender.com/test-dashboard
+GET  https://bup-fest-api-xor.onrender.com/docs
 ```
+
+The interactive Swagger/OpenAPI documentation is available at:
+
+[`https://bup-fest-api-xor.onrender.com/docs`](https://bup-fest-api-xor.onrender.com/docs)
+
+Use **Try it out** in Swagger to send a request without installing Postman. The monitoring dashboard is available at:
+
+[`https://bup-fest-api-xor.onrender.com/test-dashboard`](https://bup-fest-api-xor.onrender.com/test-dashboard)
+
+The dashboard shows request count, successful and failed requests, recent status codes, and p95 latency. It stores only request metadata in SQLite; request bodies, headers, and secrets are not stored.
 
 PowerShell health check:
 
@@ -103,6 +116,44 @@ curl -sS https://bup-fest-api-xor.onrender.com/health
 ```
 
 The free Render service may sleep after inactivity, so the first request can take longer while it starts.
+
+## Architecture flow
+
+The service separates natural-language interpretation from deterministic optimization. The LLM proposes structured directives, but deterministic validation decides whether those directives are safe to apply. The optimizer then produces a schedule and replay validation checks the result before it leaves the API.
+
+```mermaid
+flowchart LR
+    client["Client, Postman, or Swagger"] --> routes["FastAPI routes"]
+    routes --> healthRoute["GET /health"]
+    routes --> docsRoute["GET /docs"]
+    routes --> optimizeRoute["POST /optimize-energy"]
+    routes --> dashboardRoute["GET /test-dashboard"]
+
+    optimizeRoute --> requestValidation["Pydantic request validation"]
+    requestValidation --> interpreter["LLM interpreter"]
+    interpreter --> groq["Groq primary provider"]
+    interpreter --> openRouter["OpenRouter secondary fallback"]
+    groq --> structuredJson["Structured JSON interpretation"]
+    openRouter --> structuredJson
+    structuredJson --> guardrails["Deterministic guardrails"]
+    guardrails --> directives["Validated hourly directives"]
+    directives --> optimizer["SciPy HiGHS linear-program optimizer"]
+    optimizer --> replay["Replay validation"]
+    replay --> response["Validated 24-hour JSON response"]
+    response --> client
+
+    optimizeRoute --> metrics["SQLite request metrics"]
+    metrics --> dashboardRoute
+```
+
+### Request lifecycle
+
+1. FastAPI validates the scenario, one to three notes, 24 hourly records, and battery settings.
+2. Groq interprets each operator note into one structured directive. If Groq is unavailable, OpenRouter is used as the secondary provider.
+3. Deterministic guardrails validate directive types, note indexes, hour windows, numeric values, and adjustment fields.
+4. The SciPy HiGHS linear program minimizes grid cost while enforcing solar availability, grid caps, battery charge/discharge limits, reserves, and end-of-day battery neutrality.
+5. Replay validation independently checks energy balance, battery bounds, directives, totals, and the final battery level.
+6. The API returns the interpretation, 24-hour plan, totals, peak grid usage, and summary. Request metadata is recorded for the dashboard.
 
 ### `GET /health`
 
@@ -235,6 +286,26 @@ start http://127.0.0.1:8000/test-dashboard
 ```
 
 The dashboard displays request count, successful requests, errors, recent requests, and the p95 latency calculated from the SQLite log at `METRICS_DB_PATH`.
+
+The local dashboard is available at `http://127.0.0.1:8000/test-dashboard`. The deployed dashboard is available at `https://bup-fest-api-xor.onrender.com/test-dashboard`.
+
+## Testing and verification
+
+Run the deterministic and API test suite locally:
+
+```powershell
+pytest -q -s
+```
+
+The suite covers request validation, directive guardrails, optimizer constraints, replay validation, provider timeout and retry exhaustion, Groq-to-OpenRouter fallback, dashboard rendering, and secret-safe logging.
+
+Run the live 10-case test against the deployed API and save every complete JSON response:
+
+```powershell
+python -m scripts.remote_10_post_test --delay 2
+```
+
+The response log is written to `logs/remote_10_post_test.log`. The latest live run passed all 10 public cases. Live latency can vary because Render may start from sleep and external model providers may rate-limit requests.
 
 ## Optimization endpoint
 
