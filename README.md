@@ -76,6 +76,34 @@ Expected response:
 
 The service exposes three useful routes.
 
+## Public deployment
+
+The current public Render deployment is:
+
+[`https://bup-fest-api-xor.onrender.com`](https://bup-fest-api-xor.onrender.com)
+
+Use these public routes to verify the deployment:
+
+```text
+GET  https://bup-fest-api-xor.onrender.com/health
+POST https://bup-fest-api-xor.onrender.com/optimize-energy
+GET  https://bup-fest-api-xor.onrender.com/test-dashboard
+```
+
+PowerShell health check:
+
+```powershell
+Invoke-RestMethod https://bup-fest-api-xor.onrender.com/health
+```
+
+Unix shell health check:
+
+```bash
+curl -sS https://bup-fest-api-xor.onrender.com/health
+```
+
+The free Render service may sleep after inactivity, so the first request can take longer while it starts.
+
 ### `GET /health`
 
 PowerShell:
