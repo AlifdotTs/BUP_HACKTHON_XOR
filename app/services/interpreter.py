@@ -1,11 +1,13 @@
-"""LLM interpretation of operator notes with deterministic output validation."""
+"""LLM interpretation with deterministic validation and provider failover."""
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 import json
 import logging
 import os
-import asyncio
+import time
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAIError
@@ -17,13 +19,28 @@ from app.services.directives import normalize_directives
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_BACKUP_MAX_RETRIES = 1
+_DEFAULT_RETRY_DELAY_SECONDS = 1.0
+_DEFAULT_TOTAL_TIMEOUT_SECONDS = 28.0
+
 
 class InterpreterUnavailable(RuntimeError):
-    """The configured model could not provide an interpretation."""
+    """No configured model provider could provide an interpretation."""
 
 
 class InvalidInterpretation(RuntimeError):
-    """The model returned data that failed deterministic guardrails."""
+    """A model returned data that failed deterministic guardrails."""
+
+
+@dataclass(frozen=True)
+class _Provider:
+    name: str
+    api_key: str
+    model: str
+    base_url: str
+    max_retries: int
 
 
 _SYSTEM_INSTRUCTIONS = """You interpret synthetic campus energy operator notes for one 24-hour scenario.
@@ -77,19 +94,72 @@ def _validate_interpretations(
         normalize_directives(request, entries)
         return entries
     except (ValueError, TypeError, ValidationError) as exc:
-        raise InvalidInterpretation("Model interpretation failed deterministic validation") from exc
+        raise InvalidInterpretation(
+            "Model interpretation failed deterministic validation"
+        ) from exc
 
 
-async def interpret_operator_notes(request: OptimizeRequest) -> list[DirectiveInterpretation]:
-    """Call a language model and validate its structured directives before use."""
+def _read_nonnegative_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, str(default))))
+    except ValueError:
+        logger.warning("Invalid %s; using default value %.1f", name, default)
+        return default
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise InterpreterUnavailable("Operator-note model is not configured")
 
-    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
-    request_body = {
-        "model": model,
+def _read_retry_count(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except ValueError:
+        logger.warning("Invalid %s; using default value %d", name, default)
+        return default
+
+
+def _configured_providers() -> list[_Provider]:
+    """Return providers in priority order without ever logging key material."""
+
+    providers: list[_Provider] = []
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if groq_key:
+        providers.append(
+            _Provider(
+                name="Groq",
+                api_key=groq_key,
+                model=os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"),
+                base_url="https://api.groq.com/openai/v1",
+                max_retries=_read_retry_count("GROQ_MAX_RETRIES", _DEFAULT_MAX_RETRIES),
+            )
+        )
+
+    # OPEN_ROUTER_API was used in an earlier local setup. Keep it as a
+    # compatibility alias, but document and prefer OPENROUTER_API_KEY.
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get(
+        "OPEN_ROUTER_API"
+    )
+    if openrouter_key:
+        providers.append(
+            _Provider(
+                name="OpenRouter",
+                api_key=openrouter_key,
+                model=os.environ.get(
+                    "OPENROUTER_MODEL", "openai/gpt-oss-20b:free"
+                ),
+                base_url=os.environ.get(
+                    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+                ),
+                max_retries=_read_retry_count(
+                    "OPENROUTER_MAX_RETRIES", _DEFAULT_BACKUP_MAX_RETRIES
+                ),
+            )
+        )
+    return providers
+
+
+def _request_body(provider: _Provider, request: OptimizeRequest) -> dict[str, Any]:
+    # JSON mode is supported by both OpenAI-compatible endpoints. The prompt
+    # plus deterministic Pydantic/directive validation protects the schema.
+    return {
+        "model": provider.model,
         "messages": [
             {"role": "system", "content": _SYSTEM_INSTRUCTIONS},
             {
@@ -106,54 +176,172 @@ async def interpret_operator_notes(request: OptimizeRequest) -> list[DirectiveIn
         "response_format": {"type": "json_object"},
         "max_tokens": 900,
     }
-    try:
-        max_retries = max(0, int(os.environ.get("GROQ_MAX_RETRIES", "2")))
-    except ValueError:
-        max_retries = 2
-        logger.warning("Invalid GROQ_MAX_RETRIES; using default value 2")
-    try:
-        retry_delay = max(
-            0.0, float(os.environ.get("GROQ_RETRY_DELAY_SECONDS", "1.0"))
-        )
-    except ValueError:
-        retry_delay = 1.0
-        logger.warning("Invalid GROQ_RETRY_DELAY_SECONDS; using default value 1.0")
 
-    try:
-        async with AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
-            timeout=22.0,
-            max_retries=0,
-        ) as client:
-            for attempt in range(max_retries + 1):
+
+async def _call_provider(
+    provider: _Provider,
+    request: OptimizeRequest,
+    deadline: float,
+    retry_delay: float,
+) -> list[DirectiveInterpretation]:
+    """Call one provider using the shared request deadline."""
+
+    last_provider_error: BaseException | None = None
+    last_invalid_interpretation: InvalidInterpretation | None = None
+    body = _request_body(provider, request)
+
+    async with AsyncOpenAI(
+        api_key=provider.api_key,
+        base_url=provider.base_url,
+        timeout=22.0,
+        max_retries=0,
+    ) as client:
+        for attempt in range(provider.max_retries + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "%s retry budget exhausted for scenario=%s",
+                    provider.name,
+                    request.scenario_id,
+                )
+                break
+            try:
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(**body),
+                    timeout=min(22.0, remaining),
+                )
                 try:
-                    response = await asyncio.wait_for(
-                        client.chat.completions.create(**request_body),
-                        timeout=25.0,
+                    return _validate_interpretations(
+                        request, _extract_output_text(response)
                     )
-                    break
-                except OpenAIError as exc:
-                    if getattr(exc, "status_code", None) != 429:
-                        raise
-                    retry_number = attempt + 1
-                    if attempt >= max_retries:
+                except InvalidInterpretation as exc:
+                    last_invalid_interpretation = exc
+                    if attempt >= provider.max_retries:
                         logger.error(
-                            "Groq rate limit exhausted for scenario=%s after %d retries",
+                            "%s invalid interpretation retries exhausted for scenario=%s",
+                            provider.name,
                             request.scenario_id,
-                            max_retries,
                         )
                         raise
-                    wait_seconds = retry_delay * (2**attempt)
+                    wait_seconds = min(retry_delay * (2**attempt), 4.0)
                     logger.warning(
-                        "Groq rate limit triggered for scenario=%s; retry %d/%d in %.2fs",
+                        "%s invalid interpretation for scenario=%s; retry %d/%d in %.2fs",
+                        provider.name,
                         request.scenario_id,
-                        retry_number,
-                        max_retries,
+                        attempt + 1,
+                        provider.max_retries,
                         wait_seconds,
                     )
-                    await asyncio.sleep(wait_seconds)
-    except (OpenAIError, ValueError, TimeoutError) as exc:
-        raise InterpreterUnavailable("Operator-note model request failed") from exc
+                    await asyncio.sleep(
+                        min(wait_seconds, max(0.0, deadline - time.monotonic()))
+                    )
+            except OpenAIError as exc:
+                last_provider_error = exc
+                status_code = getattr(exc, "status_code", None)
+                # A missing status usually means a connection-level SDK
+                # failure, which is also safe to retry within the budget.
+                if status_code is not None and status_code not in _RETRYABLE_STATUS_CODES:
+                    raise
+                if attempt >= provider.max_retries:
+                    logger.error(
+                        "%s provider retries exhausted for scenario=%s status=%s",
+                        provider.name,
+                        request.scenario_id,
+                        status_code,
+                    )
+                    raise
+                wait_seconds = min(retry_delay * (2**attempt), 4.0)
+                if status_code == 429:
+                    logger.warning(
+                        "%s rate limit triggered for scenario=%s; retry %d/%d in %.2fs",
+                        provider.name,
+                        request.scenario_id,
+                        attempt + 1,
+                        provider.max_retries,
+                        wait_seconds,
+                    )
+                else:
+                    logger.warning(
+                        "%s provider error for scenario=%s status=%s; retry %d/%d in %.2fs",
+                        provider.name,
+                        request.scenario_id,
+                        status_code,
+                        attempt + 1,
+                        provider.max_retries,
+                        wait_seconds,
+                    )
+                await asyncio.sleep(
+                    min(wait_seconds, max(0.0, deadline - time.monotonic()))
+                )
+            except TimeoutError as exc:
+                last_provider_error = exc
+                if attempt >= provider.max_retries:
+                    logger.error(
+                        "%s timeout retries exhausted for scenario=%s",
+                        provider.name,
+                        request.scenario_id,
+                    )
+                    raise
+                wait_seconds = min(retry_delay * (2**attempt), 4.0)
+                logger.warning(
+                    "%s timeout for scenario=%s; retry %d/%d in %.2fs",
+                    provider.name,
+                    request.scenario_id,
+                    attempt + 1,
+                    provider.max_retries,
+                    wait_seconds,
+                )
+                await asyncio.sleep(
+                    min(wait_seconds, max(0.0, deadline - time.monotonic()))
+                )
 
-    return _validate_interpretations(request, _extract_output_text(response))
+    if last_invalid_interpretation is not None:
+        raise last_invalid_interpretation
+    raise InterpreterUnavailable("Provider request timed out") from last_provider_error
+
+
+async def interpret_operator_notes(
+    request: OptimizeRequest,
+) -> list[DirectiveInterpretation]:
+    """Call Groq first, then OpenRouter, validating every result deterministically."""
+
+    providers = _configured_providers()
+    if not providers:
+        raise InterpreterUnavailable("Operator-note model is not configured")
+
+    retry_delay = _read_nonnegative_float(
+        "GROQ_RETRY_DELAY_SECONDS", _DEFAULT_RETRY_DELAY_SECONDS
+    )
+    total_timeout = max(
+        1.0,
+        _read_nonnegative_float(
+            "GROQ_TOTAL_TIMEOUT_SECONDS", _DEFAULT_TOTAL_TIMEOUT_SECONDS
+        ),
+    )
+    deadline = time.monotonic() + total_timeout
+    last_provider_error: BaseException | None = None
+    last_invalid_interpretation: InvalidInterpretation | None = None
+
+    for provider in providers:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            return await _call_provider(provider, request, deadline, retry_delay)
+        except InvalidInterpretation as exc:
+            last_invalid_interpretation = exc
+            logger.warning(
+                "%s could not produce a valid interpretation for scenario=%s; trying next provider",
+                provider.name,
+                request.scenario_id,
+            )
+        except (OpenAIError, TimeoutError, ValueError, InterpreterUnavailable) as exc:
+            last_provider_error = exc
+            logger.warning(
+                "%s unavailable for scenario=%s; trying next provider",
+                provider.name,
+                request.scenario_id,
+            )
+
+    if last_invalid_interpretation is not None:
+        raise last_invalid_interpretation
+    raise InterpreterUnavailable("Operator-note model request failed") from last_provider_error

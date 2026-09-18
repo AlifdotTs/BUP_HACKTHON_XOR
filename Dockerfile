@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY app ./app
 
+# Allow the non-root runtime user to persist local SQLite request metrics.
+RUN mkdir -p data && chown -R app:app /app
+
 USER app
 
 EXPOSE 8000
