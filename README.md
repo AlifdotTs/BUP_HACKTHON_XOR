@@ -2,6 +2,30 @@
 
 FastAPI service for the BUP CSE Fest 2026 GridWise challenge. A language model interprets operator notes into structured directives; deterministic code validates the directives and a SciPy linear program produces the 24-hour schedule.
 
+## Before you begin
+
+You need either Python or Docker. Use the commands for your operating system.
+
+### Windows PowerShell
+
+Install Python 3.12 or newer from [python.org](https://www.python.org/downloads/) and Docker Desktop from [docs.docker.com/desktop](https://docs.docker.com/desktop/). Then verify the installations:
+
+```powershell
+py --version
+docker --version
+docker compose version
+```
+
+### Linux, macOS, or Unix shell
+
+Install Python 3.12 or newer and Docker Engine with the Compose plugin. Follow the official Docker instructions for [Linux](https://docs.docker.com/engine/install/) or [macOS](https://docs.docker.com/desktop/install/mac-install/), then verify:
+
+```bash
+python3 --version
+docker --version
+docker compose version
+```
+
 ## Local setup
 
 Create and activate a virtual environment, then install the dependencies:
@@ -48,17 +72,100 @@ Expected response:
 {"status":"ok"}
 ```
 
+## API routes
+
+The service exposes three useful routes.
+
+### `GET /health`
+
+PowerShell:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+Unix shell:
+
+```bash
+curl -sS http://127.0.0.1:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
+```
+
+### `POST /optimize-energy`
+
+This route requires a complete 24-hour JSON request. Save the complete `DASHBOARD-DEMO` request in the Optimization endpoint section below as `request.json`, then use one of these commands.
+
+PowerShell:
+
+```powershell
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8000/optimize-energy `
+  -Method Post `
+  -ContentType 'application/json' `
+  -InFile .\request.json
+```
+
+Unix shell:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/optimize-energy \
+  -H 'Content-Type: application/json' \
+  --data @request.json
+```
+
+The response contains the validated directive interpretation, a 24-hour `hourly_plan`, total grid usage, total cost, peak grid usage, and a plan summary.
+
+### `GET /test-dashboard`
+
+This local dashboard displays request count, success/error counts, recent request logs, and p95 latency. It records only timestamp, route, status, and latency in SQLite.
+
+Open it in a browser:
+
+```text
+http://127.0.0.1:8000/test-dashboard
+```
+
+Or use the custom route test:
+
+```powershell
+python -m scripts.custom_test
+```
+
+```bash
+python3 -m scripts.custom_test
+```
+
 ## Docker
 
 Docker Compose reads `.env` from the project directory and forwards the Groq primary and OpenRouter backup settings into the container.
 
+Published Docker Hub repository: [alifh23/bup-fest-api](https://hub.docker.com/repository/docker/alifh23/bup-fest-api/general)
+
+Pull the published image with:
+
+```powershell
+docker pull alifh23/bup-fest-api:latest
+```
+
 Build and run the API with Docker Compose:
 
 ```powershell
-docker compose up --build
+docker compose up --build -d
 ```
 
-The API is then available at `http://127.0.0.1:8000`. Stop it with:
+Check the container status and follow its logs when needed:
+
+```powershell
+docker compose ps
+docker compose logs -f api
+```
+
+The API is then available at `http://127.0.0.1:8000`. If port 8000 is already in use, set `HOST_PORT=8001` in `.env` and use `http://127.0.0.1:8001`. Stop it with:
 
 ```powershell
 docker compose down

@@ -15,7 +15,7 @@ services:
       OPENROUTER_MAX_RETRIES: ${OPENROUTER_MAX_RETRIES:-1}
       METRICS_DB_PATH: ${METRICS_DB_PATH:-data/request_metrics.sqlite3}
     ports:
-      - "8000:8000"
+      - "${HOST_PORT:-8000}:8000"
     volumes:
       - metrics_data:/app/data
     healthcheck:
