@@ -4,7 +4,7 @@ FastAPI service for the BUP CSE Fest 2026 GridWise challenge. A language model i
 
 ## Before you begin
 
-You need either Python or Docker. Use the commands for your operating system.
+You need either Python or Docker. Use the commands for your Operating System.
 
 ### Windows PowerShell
 
